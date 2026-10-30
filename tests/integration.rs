@@ -384,7 +384,6 @@ fn clipboard_wait_notice_respects_quiet_and_reports_before_waiting() {
     #[cfg(not(target_os = "linux"))]
     {
         eprintln!("SKIPPED: Linux X11 clipboard notice behavior is platform-specific");
-        return;
     }
 
     #[cfg(target_os = "linux")]

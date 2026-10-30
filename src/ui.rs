@@ -21,8 +21,8 @@ pub fn commas(n: u64) -> String {
     let len = s.len();
     let mut out = String::with_capacity(len + len / 3);
     for (i, ch) in s.chars().enumerate() {
-        if i > 0 && (len - i) % 3 == 0 {
-            out.push(',');
+        if i > 0 && (len - i).is_multiple_of(3) {
+                out.push(',');
         }
         out.push(ch);
     }
