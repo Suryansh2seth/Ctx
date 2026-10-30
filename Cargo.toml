@@ -1,0 +1,55 @@
+[package]
+name = "ctxdump"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Pack a directory's structure and file contents into one budget-checked, LLM-ready text payload."
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/your-username/ctx"
+keywords = ["cli", "llm", "context", "repomix", "tokens"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "ctx"
+path = "src/main.rs"
+
+[features]
+default = []
+# `exact` is a stub today: it gates a real BPE tokenizer that is not
+# implemented yet. Call sites and tests exist so the toggle is real; see
+# src/tokens.rs and README ("Estimates, not exact").
+exact = []
+
+[dependencies]
+# Traversal, .gitignore/.ignore/global-git-exclude handling and the parallel
+# walker. Doing this by hand is the single largest source of correctness bugs
+# in tools like this one.
+ignore = "0.4"
+# CLI parsing. `derive` keeps the flag surface and --help in one place.
+clap = { version = "4.5", features = ["derive"] }
+# Include/exclude glob matching. Same glob engine `ignore` uses internally, so
+# `--include`/`--exclude` behave consistently with ignore-file patterns.
+globset = "0.4"
+# Error context at the binary boundary: every runtime failure names the path or
+# sink it came from, and main() prints the whole chain on one line.
+anyhow = "1.0"
+# Clipboard. Text only: the default `image-data` feature is off because ctx
+# never copies images, and that would pull in an image codec stack for nothing.
+# The Wayland backend is off as well, so a Wayland-only session gets a clear
+# error telling the user to pipe to `wl-copy`; ctx never runs it for them.
+arboard = { version = "3.4", default-features = false }
+
+[dev-dependencies]
+# Integration tests drive the real binary as a subprocess. `predicates` is not
+# listed separately: assert_cmd already provides it, and the tests assert on
+# captured stdout/stderr directly.
+assert_cmd = "2.0"
+tempfile = "3.10"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
