@@ -33,6 +33,13 @@ pub enum Format {
     Plain,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SecretScan {
+    Redact,
+    Skip,
+    Off,
+}
+
 const AFTER_HELP: &str = "\
 Exit codes:
   0  success
@@ -111,13 +118,17 @@ pub struct Cli {
     #[arg(long)]
     pub hidden: bool,
 
-    /// Do not read .gitignore/.ignore/global git excludes
+    /// Do not read .gitignore/.contextignore/.ignore or global git excludes
     #[arg(long)]
     pub no_ignore: bool,
 
     /// Follow symlinks (default: do not); loops are detected and reported
     #[arg(long)]
     pub follow_symlinks: bool,
+
+    /// Only include files changed since this Git revision
+    #[arg(long, value_name = "REV")]
+    pub since: Option<String>,
 
     /// Include lockfiles (skipped by default)
     #[arg(long)]
@@ -126,6 +137,10 @@ pub struct Cli {
     /// Disable the default secret-file denylist
     #[arg(long)]
     pub include_secrets: bool,
+
+    /// Scan file contents for likely secrets: redact (default), skip, or off
+    #[arg(long, value_enum, default_value_t = SecretScan::Redact)]
+    pub secret_scan: SecretScan,
 
     /// Omit the tree section
     #[arg(long)]
@@ -327,6 +342,9 @@ mod tests {
             "3  over budget",
             "5% safety margin",
             "estimates",
+            "--since <REV>",
+            "Pressing Ctrl-C",
+            "clipboard manager has already taken it",
         ] {
             assert!(help.contains(needle), "help is missing {needle:?}");
         }

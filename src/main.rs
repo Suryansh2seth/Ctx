@@ -11,6 +11,9 @@ mod cli;
 mod filter;
 mod output;
 mod render;
+mod secrets;
+#[cfg(feature = "git")]
+mod since;
 mod tokens;
 mod ui;
 mod walk;
@@ -19,14 +22,17 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+#[cfg(not(feature = "git"))]
+use anyhow::anyhow;
 use anyhow::{Context, Result};
 use clap::Parser;
 
 use crate::budget::{Contribution, Planner};
-use crate::cli::{Cli, BUDGET_SAFETY_MARGIN};
+use crate::cli::{Cli, SecretScan, BUDGET_SAFETY_MARGIN};
 use crate::filter::{LoadOutcome, SkipCounts};
 use crate::output::{CopyOutcome, StdoutOutcome};
 use crate::render::{Payload, RenderedFile};
+use crate::secrets::{scan_content, SecretSummary};
 use crate::ui::{commas, Ui, TOP_N};
 use crate::walk::{Candidate, WalkCfg};
 
@@ -101,11 +107,17 @@ fn run(cli: &Cli, ui: &Ui) -> Result<Exit> {
     };
 
     for path in &paths {
-        if !path.exists() {
+        if !path.exists() && cli.since.is_none() {
             ui.error(&format!("no such file or directory: `{}`", path.display()));
             ui.hint("positional arguments must be existing files or directories");
             return Ok(Exit::Runtime);
         }
+    }
+    #[cfg(not(feature = "git"))]
+    if cli.since.is_some() {
+        return Err(anyhow!(
+            "--since requires Git support; rebuild ctx with its default features enabled"
+        ));
     }
 
     let include = match walk::build_globs(&cli.include, "include") {
@@ -123,8 +135,9 @@ fn run(cli: &Cli, ui: &Ui) -> Result<Exit> {
         }
     };
 
+    let existing_paths: Vec<PathBuf> = paths.iter().filter(|path| path.exists()).cloned().collect();
     let cfg = WalkCfg {
-        paths: &paths,
+        paths: &existing_paths,
         hidden: cli.hidden,
         no_ignore: cli.no_ignore,
         follow_symlinks: cli.follow_symlinks,
@@ -135,6 +148,35 @@ fn run(cli: &Cli, ui: &Ui) -> Result<Exit> {
     let phase_started = Instant::now();
     let mut walked = walk::collect(&cfg)?;
     timings.walk = phase_started.elapsed();
+    #[cfg(feature = "git")]
+    let (deleted_paths, change_kinds) = if let Some(revision) = cli.since.as_deref() {
+        let selection = since::select(
+            revision,
+            &cwd,
+            &paths,
+            walked.candidates,
+            cli,
+            include.as_ref(),
+            exclude.as_ref(),
+        )?;
+        walked.candidates = selection.candidates;
+        let change_kinds = selection
+            .kinds
+            .into_iter()
+            .map(|(path, kind)| (path, matches!(kind, since::ChangeKind::Added)))
+            .collect();
+        if walked.candidates.is_empty() && selection.deleted.is_empty() {
+            ui.since_summary(revision, 0, 0, 0);
+            ui.error("no files changed since the requested revision");
+            return Ok(Exit::Nothing);
+        }
+        (selection.deleted, change_kinds)
+    } else {
+        (Vec::new(), std::collections::BTreeMap::new())
+    };
+    #[cfg(not(feature = "git"))]
+    let (deleted_paths, change_kinds): (Vec<String>, std::collections::BTreeMap<String, bool>) =
+        (Vec::new(), std::collections::BTreeMap::new());
     let phase_started = Instant::now();
     walked.candidates.sort_by(|a, b| a.rel.cmp(&b.rel));
     timings.sort = phase_started.elapsed();
@@ -185,9 +227,18 @@ fn run(cli: &Cli, ui: &Ui) -> Result<Exit> {
     let to_read: Vec<PathBuf> = kept.iter().map(|c| c.abs.clone()).collect();
     let loaded = filter::load_many(&to_read);
     let mut loaded_files: Vec<(Candidate, String)> = Vec::with_capacity(kept.len());
+    let mut secret_summary = SecretSummary::default();
     for (candidate, outcome) in kept.into_iter().zip(loaded) {
         match outcome {
-            LoadOutcome::Text(text) => loaded_files.push((candidate, text)),
+            LoadOutcome::Text(text) => {
+                let result = scan_content(&text, cli.secret_scan);
+                secret_summary.record(&candidate.rel, &result.kinds);
+                if let Some(content) = result.content {
+                    loaded_files.push((candidate, content));
+                } else {
+                    counts.secret += 1;
+                }
+            }
             LoadOutcome::Binary => counts.binary += 1,
             LoadOutcome::Failed(message) => {
                 ui.warn(&format!("skipping `{}`: {message}", candidate.rel));
@@ -195,6 +246,7 @@ fn run(cli: &Cli, ui: &Ui) -> Result<Exit> {
         }
     }
     timings.filter_read = phase_started.elapsed();
+    ui.content_secrets(&secret_summary, cli.secret_scan == SecretScan::Skip);
 
     let phase_started = Instant::now();
     let mut files: Vec<RenderedFile> = Vec::with_capacity(loaded_files.len());
@@ -222,7 +274,10 @@ fn run(cli: &Cli, ui: &Ui) -> Result<Exit> {
     }
     timings.render = phase_started.elapsed();
 
-    if files.is_empty() {
+    if files.is_empty() && (deleted_paths.is_empty() || cli.no_tree) {
+        if cli.since.is_some() {
+            ui.since_summary(cli.since.as_deref().unwrap_or_default(), 0, 0, 0);
+        }
         ui.error("nothing to output: no files matched");
         ui.hint("check --include/--exclude and ignore files, or pass a different path");
         return Ok(Exit::Nothing);
@@ -246,7 +301,13 @@ fn run(cli: &Cli, ui: &Ui) -> Result<Exit> {
             priority: file.priority,
         })
         .collect();
-    let fixed_bytes = render::fixed_bytes(cli.format, cli.no_tree, &files);
+    let fixed_bytes = render::fixed_bytes_since(
+        cli.format,
+        cli.no_tree,
+        &files,
+        cli.since.as_deref(),
+        &deleted_paths,
+    );
     let full_bytes = fixed_bytes + contributions.iter().map(|c| c.block_bytes).sum::<u64>();
     let full_tokens = tokens::estimate_bytes(full_bytes, ratio);
 
@@ -298,13 +359,17 @@ fn run(cli: &Cli, ui: &Ui) -> Result<Exit> {
 
     // --- render and emit ---------------------------------------------------
     let render_started = Instant::now();
-    let payload = render::render_payload(&Payload {
-        format: cli.format,
-        no_tree: cli.no_tree,
-        tree_only: cli.tree_only,
-        files: &files,
-        omit: &omit,
-    });
+    let payload = render::render_payload_since(
+        &Payload {
+            format: cli.format,
+            no_tree: cli.no_tree,
+            tree_only: cli.tree_only,
+            files: &files,
+            omit: &omit,
+        },
+        cli.since.as_deref(),
+        &deleted_paths,
+    );
     timings.render += render_started.elapsed();
     let estimate_started = Instant::now();
     let payload_tokens = tokens::estimate_payload(&payload, ratio);
@@ -371,6 +436,23 @@ fn run(cli: &Cli, ui: &Ui) -> Result<Exit> {
 
     ui.summary(files.len(), payload_tokens, cli.budget);
     ui.skipped(&counts);
+    if cli.since.is_some() {
+        let mut changed = 0;
+        let mut added = 0;
+        for file in &files {
+            match change_kinds.get(&file.rel) {
+                Some(true) => added += 1,
+                Some(false) => changed += 1,
+                None => {}
+            }
+        }
+        ui.since_summary(
+            cli.since.as_deref().unwrap_or_default(),
+            changed,
+            added,
+            deleted_paths.len(),
+        );
+    }
     if let Some((dropped, saved)) = truncation {
         ui.note(&format!(
             "truncated: dropped {dropped} files, saved {} tokens (est.)",

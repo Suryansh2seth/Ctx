@@ -92,6 +92,9 @@ pub fn collect(cfg: &WalkCfg) -> Result<Walked> {
             dirs.push(path.clone());
             continue;
         }
+        if path.file_name().and_then(|name| name.to_str()) == Some(".contextignore") {
+            continue;
+        }
         let rel = rel_from(cfg.cwd, path);
         if let Some(exclude) = cfg.exclude {
             if matches_globs(exclude, &rel) {
@@ -143,6 +146,9 @@ fn walk_dirs(
         .follow_links(cfg.follow_symlinks)
         // `.git/` is always skipped, even with --hidden and --no-ignore.
         .filter_entry(|entry| entry.file_name() != ".git");
+    if !cfg.no_ignore {
+        builder.add_custom_ignore_filename(".contextignore");
+    }
 
     let cwd = cfg.cwd.to_path_buf();
     let include = cfg.include;
@@ -156,7 +162,7 @@ fn walk_dirs(
             match result {
                 Ok(entry) => {
                     let is_file = entry.file_type().map(|t| t.is_file()).unwrap_or(false);
-                    if is_file {
+                    if is_file && entry.file_name() != ".contextignore" {
                         let rel = rel_from(&cwd, entry.path());
                         let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
                         let _ = tx.send(Msg::File(entry.path().to_path_buf(), rel, size));

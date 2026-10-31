@@ -109,7 +109,15 @@ pub fn tree_line(rel: &str, omitted: bool) -> String {
 }
 
 /// Everything before the tree lines.
-pub fn prefix(format: Format, no_tree: bool) -> String {
+pub fn prefix_since(format: Format, no_tree: bool, since: Option<&str>) -> String {
+    if let Some(revision) = since {
+        let revision = revision.replace(['\r', '\n'], " ");
+        return match format {
+            Format::Xml => format!("<context since=\"{}\">\n", escape_xml_attr(&revision)),
+            Format::Md => format!("## Changed since: {revision}\n\n"),
+            Format::Plain => format!("Changed since: {revision}\n\n"),
+        };
+    }
     match format {
         Format::Xml => "<context>\n".to_string(),
         Format::Md if !no_tree => "## Tree\n\n".to_string(),
@@ -143,12 +151,26 @@ pub fn suffix(format: Format) -> String {
 /// Payload bytes that do not depend on which files are kept: the wrapper plus
 /// one un-annotated tree line per file. Content blocks are accounted
 /// separately, and the planner adds the annotation bytes for dropped files.
+#[cfg(test)]
 pub fn fixed_bytes(format: Format, no_tree: bool, files: &[RenderedFile]) -> u64 {
+    fixed_bytes_since(format, no_tree, files, None, &[])
+}
+
+pub fn fixed_bytes_since(
+    format: Format,
+    no_tree: bool,
+    files: &[RenderedFile],
+    since: Option<&str>,
+    deleted: &[String],
+) -> u64 {
     let mut lines = String::new();
     for file in files {
         lines.push_str(&tree_line(&file.rel, false));
     }
-    (prefix(format, no_tree).len()
+    for path in deleted {
+        lines.push_str(&format!("{path}  [deleted]\n"));
+    }
+    (prefix_since(format, no_tree, since).len()
         + tree_section(format, no_tree, &lines).len()
         + suffix(format).len()) as u64
 }
@@ -235,17 +257,25 @@ pub fn language_hint(rel: &str) -> &'static str {
 }
 
 /// Assemble the whole payload.
+#[cfg(test)]
 pub fn render_payload(payload: &Payload) -> String {
+    render_payload_since(payload, None, &[])
+}
+
+pub fn render_payload_since(payload: &Payload, since: Option<&str>, deleted: &[String]) -> String {
     let mut lines = String::new();
     if !payload.no_tree {
         for (i, file) in payload.files.iter().enumerate() {
             let omitted = payload.omit.get(i).copied().unwrap_or(false);
             lines.push_str(&tree_line(&file.rel, omitted));
         }
+        for path in deleted {
+            lines.push_str(&format!("{path}  [deleted]\n"));
+        }
     }
 
     let mut out = String::new();
-    out.push_str(&prefix(payload.format, payload.no_tree));
+    out.push_str(&prefix_since(payload.format, payload.no_tree, since));
     out.push_str(&tree_section(payload.format, payload.no_tree, &lines));
     if !payload.tree_only {
         for (i, file) in payload.files.iter().enumerate() {
@@ -577,5 +607,34 @@ mod tests {
             fixed + OMIT_ANNOTATION.len() as u64,
             "{out}"
         );
+    }
+
+    #[test]
+    fn since_revision_and_deleted_paths_are_rendered_and_accounted() {
+        let deleted = vec!["gone.rs".to_string()];
+        for format in [Format::Xml, Format::Md, Format::Plain] {
+            let files = vec![file_with(format, "src/main.rs", "fn main() {}\n")];
+            let revision = "HEAD<&";
+            let fixed = fixed_bytes_since(format, false, &files, Some(revision), &deleted);
+            let out = render_payload_since(
+                &Payload {
+                    format,
+                    no_tree: false,
+                    tree_only: false,
+                    files: &files,
+                    omit: &[false],
+                },
+                Some(revision),
+                &deleted,
+            );
+            assert_eq!(out.len() as u64, fixed + files[0].block_bytes, "{out}");
+            assert!(out.contains("gone.rs  [deleted]"), "{out}");
+            assert!(!out.contains("===== gone.rs ====="), "{out}");
+            match format {
+                Format::Xml => assert!(out.starts_with("<context since=\"HEAD&lt;&amp;\">\n")),
+                Format::Md => assert!(out.starts_with("## Changed since: HEAD<&\n\n")),
+                Format::Plain => assert!(out.starts_with("Changed since: HEAD<&\n\n")),
+            }
+        }
     }
 }

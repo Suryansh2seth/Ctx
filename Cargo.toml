@@ -1,12 +1,12 @@
 [package]
 name = "ctxdump"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.88"
 description = "Pack a directory's structure and file contents into one budget-checked, LLM-ready text payload."
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/your-username/ctx"
+repository = "https://github.com/Suryansh2seth/Ctx"
 keywords = ["cli", "llm", "context", "repomix", "tokens"]
 categories = ["command-line-utilities", "development-tools"]
 
@@ -15,7 +15,8 @@ name = "ctx"
 path = "src/main.rs"
 
 [features]
-default = []
+default = ["git"]
+git = ["dep:gix"]
 # `exact` is a stub today: it gates a real BPE tokenizer that is not
 # implemented yet. Call sites and tests exist so the toggle is real; see
 # src/tokens.rs and README ("Estimates, not exact").
@@ -39,6 +40,9 @@ anyhow = "1.0"
 # The Wayland backend is off as well, so a Wayland-only session gets a clear
 # error telling the user to pipe to `wl-copy`; ctx never runs it for them.
 arboard = { version = "3.4", default-features = false }
+# In-process revision and object access for --since. No network or worktree
+# mutation features are enabled.
+gix = { version = "0.90", default-features = false, features = ["revision", "sha1", "sha256"], optional = true }
 
 [dev-dependencies]
 # Integration tests drive the real binary as a subprocess. `predicates` is not

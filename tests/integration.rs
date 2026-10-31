@@ -44,6 +44,7 @@ fn ctx_raw(dir: &Path) -> std::process::Command {
         .env("HOME", &home)
         .env("USERPROFILE", &home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("GIT_CEILING_DIRECTORIES", dir)
         .env("NO_COLOR", "1")
         .env_remove("GIT_DIR");
     command
@@ -91,6 +92,49 @@ fn plain_fixture() -> TempDir {
     dir
 }
 
+fn committed_git_fixture() -> Option<TempDir> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    write_file(root, "changed.txt", "before\n");
+    write_file(root, "same.txt", "unchanged\n");
+    write_file(root, "deleted.txt", "remove me\n");
+    write_file(root, "staged.txt", "before staged edit\n");
+
+    let init = std::process::Command::new("git")
+        .arg("init")
+        .arg("-q")
+        .current_dir(root)
+        .output();
+    let init = match init {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            println!("SKIPPED: git executable is not installed");
+            return None;
+        }
+        Err(error) => panic!("could not start git: {error}"),
+    };
+    assert!(init.status.success(), "git init failed: {init:?}");
+
+    git(root, &["config", "user.email", "ctx-test@example.invalid"]);
+    git(root, &["config", "user.name", "ctx integration test"]);
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "baseline"]);
+    Some(dir)
+}
+
+fn git(root: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Traversal and ignore rules
 // ---------------------------------------------------------------------------
@@ -131,6 +175,94 @@ fn no_ignore_disables_ignore_files() {
 
     assert!(!out(ctx(root).arg("-f").arg("plain")).contains("a.log"));
     assert!(out(ctx(root).arg("-f").arg("plain").arg("--no-ignore")).contains("a.log"));
+}
+
+#[test]
+fn contextignore_supports_nested_rules_negation_and_no_ignore() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    write_file(root, ".gitignore", "*.gitignored\n");
+    write_file(root, ".contextignore", "ignored-dir/\n*.tmp\n!keep.tmp\n");
+    write_file(root, "ignored-dir/hidden.txt", "hidden\n");
+    write_file(root, "also-ignored.gitignored", "ignored\n");
+    write_file(root, "dropped.tmp", "temporary\n");
+    write_file(root, "keep.tmp", "kept\n");
+    write_file(root, "nested/.contextignore", "*.secret\n!keep.secret\n");
+    write_file(root, "nested/drop.secret", "secret\n");
+    write_file(root, "nested/keep.secret", "kept\n");
+
+    let output = ctx(root)
+        .arg("--hidden")
+        .arg("-f")
+        .arg("plain")
+        .output()
+        .expect("run with contextignore");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("keep.tmp"),
+        "negation should keep a root file"
+    );
+    assert!(
+        stdout.contains("nested/keep.secret"),
+        "nested negation should keep file"
+    );
+    assert!(!stdout.contains("ignored-dir/hidden.txt"));
+    assert!(!stdout.contains("dropped.tmp"));
+    assert!(!stdout.contains("nested/drop.secret"));
+    assert!(!stdout.contains(".contextignore"));
+    assert!(!stdout.contains("also-ignored.gitignored"));
+
+    let output = ctx(root)
+        .arg("--hidden")
+        .arg("--no-ignore")
+        .arg("-f")
+        .arg("plain")
+        .output()
+        .expect("run without ignore rules");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("ignored-dir/hidden.txt"));
+    assert!(stdout.contains("dropped.tmp"));
+    assert!(stdout.contains("nested/drop.secret"));
+    assert!(stdout.contains("also-ignored.gitignored"));
+    assert!(!stdout.contains(".contextignore"));
+}
+
+#[test]
+fn lockfiles_are_skipped_by_default_and_included_on_request() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let lockfiles = [
+        "bun.lock",
+        "deno.lock",
+        "flake.lock",
+        "Pipfile.lock",
+        "yarn.lock",
+        "go.sum",
+    ];
+    for name in lockfiles {
+        write_file(root, name, &format!("content for {name}\n"));
+    }
+    write_file(root, "lockfile-notes.md", "notes\n");
+    write_file(root, "block.rs", "fn block() {}\n");
+
+    let output = ctx(root)
+        .arg("-f")
+        .arg("plain")
+        .output()
+        .expect("run with lockfiles excluded");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for name in lockfiles {
+        assert!(!stdout.contains(&format!("===== {name} =====")));
+    }
+    assert!(stdout.contains("lockfile-notes.md"));
+    assert!(stdout.contains("block.rs"));
+    assert!(stderr.contains("6 lockfiles"));
+
+    let stdout = out(ctx(root).arg("-f").arg("plain").arg("--include-lockfiles"));
+    for name in lockfiles {
+        assert!(stdout.contains(&format!("===== {name} =====")));
+    }
 }
 
 #[test]
@@ -377,6 +509,53 @@ fn hidden_timing_is_opt_in_and_printed_only_to_stderr() {
         .expect("run without timing");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!stderr.contains("ctx timing:"), "{stderr}");
+}
+
+#[test]
+fn content_secret_modes_redact_skip_and_disable_scanning() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let fake = format!(
+        "{}{}",
+        "ghp_",
+        ["aB3dE5fG7hJ9kL2mN4pQ6rS8tU0vW1xY"].concat()
+    );
+    let source = format!("before {fake} after\n");
+    write_file(root, "notes.txt", &source);
+
+    let output = ctx(root)
+        .arg("-f")
+        .arg("plain")
+        .output()
+        .expect("run default redaction");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stdout.contains("before [REDACTED:github-token] after"));
+    assert!(!stdout.contains(&fake));
+    assert!(!stderr.contains(&fake));
+    assert!(stderr.contains("redacted 1 secrets in 1 files"));
+    assert!(stderr.contains("notes.txt"));
+
+    let output = ctx(root)
+        .arg("-f")
+        .arg("plain")
+        .arg("--secret-scan")
+        .arg("skip")
+        .output()
+        .expect("run secret skip mode");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stdout.contains("before"));
+    assert!(!stdout.contains(&fake));
+    assert!(!stderr.contains(&fake));
+    assert!(stderr.contains("skipped 1 secrets"));
+
+    let stdout = out(ctx(root)
+        .arg("-f")
+        .arg("plain")
+        .arg("--secret-scan")
+        .arg("off"));
+    assert!(stdout.contains(&fake));
 }
 
 #[test]
@@ -759,4 +938,224 @@ fn follow_symlinks_does_not_hang_on_a_loop() {
     assert_eq!(output.status.code(), Some(0), "should terminate cleanly");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("a/file.rs"), "{stdout}");
+}
+
+#[test]
+fn since_includes_worktree_changes_additions_and_deletions_only() {
+    let Some(dir) = committed_git_fixture() else {
+        return;
+    };
+    let root = dir.path();
+    write_file(root, "changed.txt", "after\n");
+    write_file(root, "staged.txt", "after staged edit\n");
+    git(root, &["add", "staged.txt"]);
+    write_file(root, "added.txt", "new file\n");
+    write_file(root, "untracked.txt", "untracked\n");
+    fs::remove_file(root.join("deleted.txt")).expect("delete tracked file");
+
+    let output = ctx(root)
+        .arg("--since")
+        .arg("HEAD")
+        .arg("--format")
+        .arg("plain")
+        .output()
+        .expect("run since");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stdout.starts_with("Changed since: HEAD\n\n"), "{stdout}");
+    for path in ["changed.txt", "staged.txt", "added.txt", "untracked.txt"] {
+        assert!(stdout.contains(path), "missing {path}:\n{stdout}");
+    }
+    assert!(stdout.contains("deleted.txt  [deleted]"), "{stdout}");
+    assert!(!stdout.contains("===== deleted.txt ====="), "{stdout}");
+    assert!(!stdout.contains("same.txt"), "{stdout}");
+    assert!(
+        stderr.contains("--since HEAD: 2 changed, 2 added, 1 deleted"),
+        "{stderr}"
+    );
+
+    let explicit_deleted = ctx(root)
+        .arg("--since")
+        .arg("HEAD")
+        .arg("deleted.txt")
+        .arg("--format")
+        .arg("plain")
+        .output()
+        .expect("run with deleted path explicitly selected");
+    assert_eq!(
+        explicit_deleted.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&explicit_deleted.stderr)
+    );
+    assert!(String::from_utf8_lossy(&explicit_deleted.stdout).contains("deleted.txt  [deleted]"));
+}
+
+#[test]
+fn since_returns_four_when_worktree_matches_revision() {
+    let Some(dir) = committed_git_fixture() else {
+        return;
+    };
+    let output = ctx(dir.path())
+        .arg("--since")
+        .arg("HEAD")
+        .output()
+        .expect("run unchanged since");
+    assert_eq!(output.status.code(), Some(4));
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("--since HEAD: 0 changed, 0 added, 0 deleted"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn since_deleted_paths_respect_ignore_rules_and_no_ignore() {
+    let Some(dir) = committed_git_fixture() else {
+        return;
+    };
+    let root = dir.path();
+    write_file(root, ".gitignore", "deleted.txt\n");
+    fs::remove_file(root.join("deleted.txt")).expect("delete tracked file");
+
+    let ignored = ctx(root)
+        .arg("--since")
+        .arg("HEAD")
+        .arg("--format")
+        .arg("plain")
+        .output()
+        .expect("run with ignore rules");
+    let ignored_stdout = String::from_utf8_lossy(&ignored.stdout);
+    assert!(
+        !ignored_stdout.contains("deleted.txt  [deleted]"),
+        "{ignored_stdout}"
+    );
+
+    let included = ctx(root)
+        .arg("--since")
+        .arg("HEAD")
+        .arg("--no-ignore")
+        .arg("--format")
+        .arg("plain")
+        .output()
+        .expect("run without ignore rules");
+    let included_stdout = String::from_utf8_lossy(&included.stdout);
+    assert!(
+        included_stdout.contains("deleted.txt  [deleted]"),
+        "{included_stdout}"
+    );
+}
+
+#[test]
+fn since_rejects_sha256_repositories() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let init = std::process::Command::new("git")
+        .args(["init", "-q", "--object-format=sha256"])
+        .current_dir(dir.path())
+        .output();
+    match init {
+        Ok(output) if output.status.success() => {}
+        Ok(_) => {
+            println!("SKIPPED: installed Git cannot initialize SHA-256 repositories");
+            return;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            println!("SKIPPED: git executable is not installed");
+            return;
+        }
+        Err(error) => panic!("could not start git: {error}"),
+    }
+    let output = ctx(dir.path())
+        .arg("--since")
+        .arg("HEAD")
+        .output()
+        .expect("run SHA-256 repository check");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("unsupported Git object format"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn since_reports_invalid_revision_and_missing_repository() {
+    let Some(dir) = committed_git_fixture() else {
+        return;
+    };
+    let invalid = ctx(dir.path())
+        .arg("--since")
+        .arg("not-a-real-revision")
+        .output()
+        .expect("run invalid revision");
+    assert_eq!(invalid.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&invalid.stderr).contains("shallow clones may not contain"),
+        "{}",
+        String::from_utf8_lossy(&invalid.stderr)
+    );
+
+    #[cfg(windows)]
+    {
+        let windows_dir = Path::new(r"C:\Windows");
+        let file = windows_dir.join(r"System32\drivers\etc\hosts");
+        if !file.is_file() {
+            println!("SKIPPED: Windows hosts file is unavailable");
+            return;
+        }
+        let home = tempfile::tempdir().expect("tempdir");
+        let output = std::process::Command::new(BIN)
+            .current_dir(windows_dir)
+            .arg("--since")
+            .arg("HEAD")
+            .arg(r"System32\drivers\etc\hosts")
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path())
+            .env("NO_COLOR", "1")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .output()
+            .expect("run outside repository");
+        assert_eq!(output.status.code(), Some(1));
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("not inside a Git repository"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(not(windows))]
+    {
+        let outside = tempfile::tempdir().expect("tempdir");
+        write_file(outside.path(), "a.txt", "content\n");
+        let ancestor_repo = std::process::Command::new("git")
+            .arg("rev-parse")
+            .arg("--show-toplevel")
+            .current_dir(outside.path())
+            .output()
+            .expect("check whether the temporary directory has an ancestor repository");
+        if ancestor_repo.status.success() {
+            println!("SKIPPED: temporary directory is inside an ancestor Git worktree");
+            return;
+        }
+        let output = ctx(outside.path())
+            .arg("--since")
+            .arg("HEAD")
+            .output()
+            .expect("run outside repository");
+        assert_eq!(output.status.code(), Some(1));
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("not inside a Git repository"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }

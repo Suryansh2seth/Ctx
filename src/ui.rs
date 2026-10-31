@@ -7,6 +7,7 @@ use std::io::{self, IsTerminal, Write};
 
 use crate::budget::DirNode;
 use crate::filter::SkipCounts;
+use crate::secrets::SecretSummary;
 use crate::tokens;
 
 /// Terminal width the breakdown is laid out for.
@@ -127,6 +128,41 @@ impl Ui {
         }
         let prefix = self.paint("36", "ctx:");
         self.line(&format!("{prefix} skipped: {}", parts.join(", ")));
+    }
+
+    pub fn since_summary(&self, revision: &str, changed: usize, added: usize, deleted: usize) {
+        if self.quiet {
+            return;
+        }
+        let prefix = self.paint("36", "ctx:");
+        self.line(&format!(
+            "{prefix} --since {revision}: {changed} changed, {added} added, {deleted} deleted"
+        ));
+    }
+
+    pub fn content_secrets(&self, summary: &SecretSummary, skipped: bool) {
+        if self.quiet || summary.total() == 0 {
+            return;
+        }
+        let kinds = summary
+            .kinds
+            .iter()
+            .map(|(kind, count)| format!("{}: {count}", kind.label()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let paths = summary
+            .files
+            .iter()
+            .map(|path| format!("{path:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let action = if skipped { "skipped" } else { "redacted" };
+        let prefix = self.paint("36", "ctx:");
+        self.line(&format!(
+            "{prefix} {action} {} secrets in {} files ({kinds}); files: {paths}",
+            summary.total(),
+            summary.files.len()
+        ));
     }
 
     /// Render the breakdown tree as text (pure, so it can be unit-tested).

@@ -16,15 +16,14 @@ pub const REPLACEMENT_RATIO: f64 = 0.01;
 /// Lockfiles are skipped by default, because they are huge, mechanical and
 /// almost never useful as LLM context.
 pub const LOCKFILES: &[&str] = &[
-    "Cargo.lock",
     "package-lock.json",
-    "yarn.lock",
+    "npm-shrinkwrap.json",
     "pnpm-lock.yaml",
-    "poetry.lock",
-    "Gemfile.lock",
-    "composer.lock",
     "go.sum",
-    "uv.lock",
+    "packages.lock.json",
+    "gradle.lockfile",
+    "Package.resolved",
+    "bun.lockb",
 ];
 
 /// Build/vendor junk that is commonly *not* gitignored.
@@ -86,7 +85,7 @@ pub fn file_name(path: &Path) -> &str {
 
 /// True for the lockfiles in [`LOCKFILES`].
 pub fn is_lockfile_name(name: &str) -> bool {
-    LOCKFILES.contains(&name)
+    name.ends_with(".lock") || LOCKFILES.contains(&name)
 }
 
 /// True for generated build artefacts listed in [`JUNK_SUFFIXES`].
