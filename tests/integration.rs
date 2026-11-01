@@ -91,7 +91,7 @@ fn plain_fixture() -> TempDir {
     );
     dir
 }
-
+#[cfg(feature = "git")]
 fn committed_git_fixture() -> Option<TempDir> {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
@@ -121,7 +121,7 @@ fn committed_git_fixture() -> Option<TempDir> {
     git(root, &["commit", "-q", "-m", "baseline"]);
     Some(dir)
 }
-
+#[cfg(feature = "git")]
 fn git(root: &Path, args: &[&str]) {
     let output = std::process::Command::new("git")
         .args(args)
