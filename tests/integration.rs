@@ -366,7 +366,7 @@ fn lockfiles_secrets_and_junk_are_skipped_by_default() {
         "secret contents must never be emitted"
     );
 }
-#[cfg(feature = "git")]
+
 #[test]
 fn opt_in_flags_restore_lockfiles_secrets_and_junk() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -939,7 +939,7 @@ fn follow_symlinks_does_not_hang_on_a_loop() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("a/file.rs"), "{stdout}");
 }
-
+#[cfg(feature = "git")]
 #[test]
 fn since_includes_worktree_changes_additions_and_deletions_only() {
     let Some(dir) = committed_git_fixture() else {
@@ -996,7 +996,7 @@ fn since_includes_worktree_changes_additions_and_deletions_only() {
     );
     assert!(String::from_utf8_lossy(&explicit_deleted.stdout).contains("deleted.txt  [deleted]"));
 }
-
+#[cfg(feature = "git")]
 #[test]
 fn since_returns_four_when_worktree_matches_revision() {
     let Some(dir) = committed_git_fixture() else {
@@ -1016,7 +1016,7 @@ fn since_returns_four_when_worktree_matches_revision() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
-
+#[cfg(feature = "git")]
 #[test]
 fn since_deleted_paths_respect_ignore_rules_and_no_ignore() {
     let Some(dir) = committed_git_fixture() else {
@@ -1053,7 +1053,7 @@ fn since_deleted_paths_respect_ignore_rules_and_no_ignore() {
         "{included_stdout}"
     );
 }
-
+#[cfg(feature = "git")]
 #[test]
 fn since_rejects_sha256_repositories() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1085,7 +1085,7 @@ fn since_rejects_sha256_repositories() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
-
+#[cfg(feature = "git")]
 #[test]
 fn since_reports_invalid_revision_and_missing_repository() {
     let Some(dir) = committed_git_fixture() else {
