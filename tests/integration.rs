@@ -366,7 +366,7 @@ fn lockfiles_secrets_and_junk_are_skipped_by_default() {
         "secret contents must never be emitted"
     );
 }
-
+#[cfg(feature = "git")]
 #[test]
 fn opt_in_flags_restore_lockfiles_secrets_and_junk() {
     let dir = tempfile::tempdir().expect("tempdir");
