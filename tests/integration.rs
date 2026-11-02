@@ -242,6 +242,7 @@ fn lockfiles_are_skipped_by_default_and_included_on_request() {
     for name in lockfiles {
         write_file(root, name, &format!("content for {name}\n"));
     }
+    write_file(root, "clock.lock.rs", "fn clock() {}\n");
     write_file(root, "lockfile-notes.md", "notes\n");
     write_file(root, "block.rs", "fn block() {}\n");
 
@@ -256,6 +257,7 @@ fn lockfiles_are_skipped_by_default_and_included_on_request() {
         assert!(!stdout.contains(&format!("===== {name} =====")));
     }
     assert!(stdout.contains("lockfile-notes.md"));
+    assert!(stdout.contains("clock.lock.rs"));
     assert!(stdout.contains("block.rs"));
     assert!(stderr.contains("6 lockfiles"));
 
@@ -296,6 +298,22 @@ fn include_and_exclude_globs_are_applied() {
     let without_src = out(ctx(root).arg("-f").arg("plain").arg("-e").arg("src/**"));
     assert!(!without_src.contains("src/main.rs"), "{without_src}");
     assert!(without_src.contains("README.md"), "{without_src}");
+}
+
+#[test]
+fn include_globs_are_applied_to_explicit_file_paths() {
+    let dir = plain_fixture();
+    let output = ctx(dir.path())
+        .arg("src/main.rs")
+        .arg("--include")
+        .arg("*.md")
+        .arg("--format")
+        .arg("plain")
+        .output()
+        .expect("run with an explicit path outside the include glob");
+
+    assert_eq!(output.status.code(), Some(4));
+    assert!(output.stdout.is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -509,6 +527,25 @@ fn hidden_timing_is_opt_in_and_printed_only_to_stderr() {
         .expect("run without timing");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!stderr.contains("ctx timing:"), "{stderr}");
+}
+
+#[test]
+fn quiet_suppresses_stats_and_timing_output() {
+    let dir = plain_fixture();
+    let output = ctx_raw(dir.path())
+        .arg("--quiet")
+        .arg("--stats")
+        .env("CTX_TIMING", "1")
+        .output()
+        .expect("run quiet with stats and timing enabled");
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stdout.starts_with(b"<context>\n"));
+    assert!(
+        output.stderr.is_empty(),
+        "non-error stderr should be suppressed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -913,6 +950,32 @@ fn output_flag_writes_the_payload_to_a_file() {
 }
 
 #[test]
+fn output_file_is_not_included_in_its_own_payload() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    write_file(root, "source.rs", "fn source() {}\n");
+    write_file(root, "payload.txt", "previous output\n");
+
+    let output = ctx(root)
+        .arg("--format")
+        .arg("plain")
+        .arg("--output")
+        .arg("payload.txt")
+        .output()
+        .expect("run with output inside input tree");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload = fs::read_to_string(root.join("payload.txt")).expect("read output");
+    assert!(!payload.contains("===== payload.txt ====="), "{payload}");
+    assert!(!payload.contains("previous output"), "{payload}");
+    assert!(payload.contains("===== source.rs ====="), "{payload}");
+}
+
+#[test]
 fn follow_symlinks_does_not_hang_on_a_loop() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
@@ -1097,10 +1160,14 @@ fn since_reports_invalid_revision_and_missing_repository() {
         .output()
         .expect("run invalid revision");
     assert_eq!(invalid.status.code(), Some(1));
+    let invalid_stderr = String::from_utf8_lossy(&invalid.stderr);
     assert!(
-        String::from_utf8_lossy(&invalid.stderr).contains("shallow clones may not contain"),
-        "{}",
-        String::from_utf8_lossy(&invalid.stderr)
+        invalid_stderr.contains("cannot resolve revision"),
+        "{invalid_stderr}"
+    );
+    assert!(
+        !invalid_stderr.contains("shallow clones may not contain"),
+        "a non-shallow repository must not get a shallow-clone hint:\n{invalid_stderr}"
     );
 
     #[cfg(windows)]
@@ -1158,4 +1225,75 @@ fn since_reports_invalid_revision_and_missing_repository() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+}
+
+#[cfg(feature = "git")]
+#[test]
+fn since_distinguishes_an_unborn_repository_from_an_invalid_revision() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let init = std::process::Command::new("git")
+        .arg("init")
+        .arg("-q")
+        .current_dir(dir.path())
+        .output();
+    let init = match init {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            println!("SKIPPED: git executable is not installed");
+            return;
+        }
+        Err(error) => panic!("could not start git: {error}"),
+    };
+    assert!(init.status.success(), "git init failed: {init:?}");
+
+    let output = ctx(dir.path())
+        .arg("--since")
+        .arg("HEAD")
+        .output()
+        .expect("run since in an empty repository");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("repository has no commits yet"), "{stderr}");
+    assert!(
+        !stderr.contains("shallow clones may not contain"),
+        "{stderr}"
+    );
+}
+
+#[cfg(feature = "git")]
+#[test]
+fn since_only_suggests_a_shallow_clone_when_the_repository_is_shallow() {
+    let Some(source) = committed_git_fixture() else {
+        return;
+    };
+    write_file(source.path(), "changed.txt", "second commit\n");
+    git(source.path(), &["add", "changed.txt"]);
+    git(source.path(), &["commit", "-q", "-m", "second"]);
+
+    let clone = tempfile::tempdir().expect("clone directory");
+    let source_url = format!(
+        "file:///{}",
+        source.path().to_string_lossy().replace('\\', "/")
+    );
+    let clone_result = std::process::Command::new("git")
+        .args(["clone", "--depth", "1", "--quiet", &source_url])
+        .arg(clone.path())
+        .output()
+        .expect("run shallow clone");
+    assert!(
+        clone_result.status.success(),
+        "git clone failed: {}",
+        String::from_utf8_lossy(&clone_result.stderr)
+    );
+
+    let output = ctx(clone.path())
+        .arg("--since")
+        .arg("HEAD~1")
+        .output()
+        .expect("run since with a missing shallow-history revision");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("shallow clone may not contain"), "{stderr}");
 }

@@ -96,6 +96,11 @@ pub fn collect(cfg: &WalkCfg) -> Result<Walked> {
             continue;
         }
         let rel = rel_from(cfg.cwd, path);
+        if let Some(include) = cfg.include {
+            if !matches_globs(include, &rel) {
+                continue;
+            }
+        }
         if let Some(exclude) = cfg.exclude {
             if matches_globs(exclude, &rel) {
                 continue;
@@ -230,6 +235,15 @@ fn rel_from(cwd: &Path, path: &Path) -> String {
     } else {
         to_slash(&normalised)
     }
+}
+
+pub fn absolute_lexical(cwd: &Path, path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    normalise(&absolute)
 }
 
 /// Lexically remove `.` components and resolve `..` textually. No filesystem

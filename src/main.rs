@@ -19,6 +19,8 @@ mod ui;
 mod walk;
 
 use std::io::IsTerminal;
+#[cfg(feature = "git")]
+use std::path::Path;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -57,8 +59,8 @@ struct PhaseTimings {
 }
 
 impl PhaseTimings {
-    fn report_if_enabled(&self) {
-        if std::env::var_os("CTX_TIMING").as_deref() != Some(std::ffi::OsStr::new("1")) {
+    fn report_if_enabled(&self, quiet: bool) {
+        if quiet || std::env::var_os("CTX_TIMING").as_deref() != Some(std::ffi::OsStr::new("1")) {
             return;
         }
         eprintln!(
@@ -148,9 +150,18 @@ fn run(cli: &Cli, ui: &Ui) -> Result<Exit> {
     let phase_started = Instant::now();
     let mut walked = walk::collect(&cfg)?;
     timings.walk = phase_started.elapsed();
+    let output_path = cli
+        .output
+        .as_deref()
+        .map(|path| walk::absolute_lexical(&cwd, path));
+    if let Some(output_path) = &output_path {
+        walked
+            .candidates
+            .retain(|candidate| walk::absolute_lexical(&cwd, &candidate.abs) != *output_path);
+    }
     #[cfg(feature = "git")]
     let (deleted_paths, change_kinds) = if let Some(revision) = cli.since.as_deref() {
-        let selection = since::select(
+        let mut selection = since::select(
             revision,
             &cwd,
             &paths,
@@ -159,6 +170,11 @@ fn run(cli: &Cli, ui: &Ui) -> Result<Exit> {
             include.as_ref(),
             exclude.as_ref(),
         )?;
+        if let Some(output_path) = &output_path {
+            selection
+                .deleted
+                .retain(|path| walk::absolute_lexical(&cwd, Path::new(path)) != *output_path);
+        }
         walked.candidates = selection.candidates;
         let change_kinds = selection
             .kinds
@@ -427,7 +443,7 @@ fn run(cli: &Cli, ui: &Ui) -> Result<Exit> {
             // The reader went away. Leave quietly with success.
             StdoutOutcome::ClosedEarly => {
                 timings.write = phase_started.elapsed();
-                timings.report_if_enabled();
+                timings.report_if_enabled(cli.quiet);
                 return Ok(Exit::Success);
             }
         }
@@ -459,7 +475,7 @@ fn run(cli: &Cli, ui: &Ui) -> Result<Exit> {
             commas(saved)
         ));
     }
-    timings.report_if_enabled();
+    timings.report_if_enabled(cli.quiet);
 
     Ok(Exit::Success)
 }

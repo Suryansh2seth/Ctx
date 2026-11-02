@@ -256,7 +256,8 @@ A file is left out when it is:
 3. **A lockfile** — any filename ending in `.lock`, plus `package-lock.json`,
    `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `go.sum`, `packages.lock.json`,
    `gradle.lockfile`, `Package.resolved`, and `bun.lockb`. Override with
-   `--include-lockfiles`.
+   `--include-lockfiles`. The rule is a filename suffix match, so
+   `clock.lock.rs` is an ordinary source file and is not skipped.
 4. **Build/vendor junk** — `*.min.js`, `*.min.css`, `*.map`, `*.snap`. An
    `--include` glob that matches the file opts it back in.
 5. **A likely secret filename** — `.env`, `.env.*` (except `.env.example` and
@@ -301,7 +302,11 @@ may also remain below it. The generic rule only examines values assigned to
 secret-like names; ordinary fields such as `blob` are not candidates. This
 heuristic can still produce false positives
 for unusual high-entropy values and false negatives for unrecognized formats,
-short values or values with low entropy.
+short values or values with low entropy. The generic assignment rule only
+recognizes quoted values that begin and end on the same line; it does not parse
+structured formats, so unquoted YAML/TOML/`.env` assignments and values split
+across lines are not detected by that rule. Provider-specific tokens and PEM
+blocks can still be recognized independently of assignment syntax.
 
 This scan is a best-effort heuristic, not a guarantee or a substitute for a
 dedicated secret scanner. If the presence of a secret is uncertain, use an

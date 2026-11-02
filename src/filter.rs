@@ -246,7 +246,13 @@ mod tests {
         for name in LOCKFILES {
             assert!(is_lockfile_name(name), "{name} should be a lockfile");
         }
-        for name in ["Cargo.toml", "lock.json", "go.mod", "uv.lock.bak"] {
+        for name in [
+            "Cargo.toml",
+            "lock.json",
+            "go.mod",
+            "uv.lock.bak",
+            "clock.lock.rs",
+        ] {
             assert!(!is_lockfile_name(name), "{name} is not a lockfile");
         }
     }

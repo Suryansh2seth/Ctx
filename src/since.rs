@@ -8,7 +8,7 @@ use ignore::Match;
 
 use crate::cli::Cli;
 use crate::filter;
-use crate::walk::{self, Candidate};
+use crate::walk::{self, absolute_lexical, Candidate};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChangeKind {
@@ -39,15 +39,30 @@ pub fn select(
         ));
     }
 
+    if repo
+        .head()
+        .context("cannot read repository HEAD")?
+        .is_unborn()
+    {
+        return Err(anyhow!("repository has no commits yet"));
+    }
+
+    let is_shallow = repo
+        .is_shallow()
+        .context("cannot determine whether the repository is shallow")?;
     let object = repo
         .rev_parse_single(gix::bstr::BStr::new(rev.as_bytes()))
         .and_then(|id| id.object())
         .and_then(|object| object.peel_to_commit())
         .map_err(|_| {
-            anyhow!(
-                "cannot resolve revision `{}`; shallow clones may not contain the requested commit",
-                one_line(rev)
-            )
+            let revision = one_line(rev);
+            if is_shallow {
+                anyhow!(
+                    "cannot resolve revision `{revision}`; a shallow clone may not contain the requested commit"
+                )
+            } else {
+                anyhow!("cannot resolve revision `{revision}`")
+            }
         })?;
     let tree = object
         .tree()
@@ -240,25 +255,6 @@ fn normalize_crlf(bytes: &[u8]) -> Vec<u8> {
         index += 1;
     }
     normalized
-}
-
-fn absolute_lexical(cwd: &Path, path: &Path) -> PathBuf {
-    let path = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        cwd.join(path)
-    };
-    let mut output = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                output.pop();
-            }
-            other => output.push(other.as_os_str()),
-        }
-    }
-    output
 }
 
 fn in_scope(path: &Path, scopes: &[PathBuf]) -> bool {

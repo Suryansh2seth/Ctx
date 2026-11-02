@@ -179,6 +179,9 @@ impl Ui {
 
     /// Print a breakdown tree to stderr.
     pub fn breakdown(&self, root: &DirNode, top_n: usize, mark_largest: bool) {
+        if self.quiet {
+            return;
+        }
         let text = Self::render_breakdown(root, top_n, mark_largest);
         let mut err = io::stderr();
         let _ = write!(err, "{text}");
