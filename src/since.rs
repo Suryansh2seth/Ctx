@@ -73,24 +73,57 @@ pub fn select(
             continue;
         }
         let rel = String::from_utf8_lossy(&entry.filepath).into_owned();
-        entries.insert(rel, entry.oid);
+        entries.insert(rel, (entry.oid, entry.mode));
+    }
+
+    let head_tree = repo
+        .head_commit()
+        .context("cannot read repository HEAD commit")?
+        .tree()
+        .context("cannot read repository HEAD tree")?;
+    let mut head_modes = BTreeMap::new();
+    for entry in head_tree.traverse().breadthfirst.files()? {
+        if !entry.mode.is_blob_or_symlink() {
+            continue;
+        }
+        let rel = String::from_utf8_lossy(&entry.filepath).into_owned();
+        head_modes.insert(rel, entry.mode);
     }
 
     let workdir = repo
         .workdir()
         .ok_or_else(|| anyhow!("--since requires a Git working tree"))?;
+    let index = repo.index().context("cannot read repository index")?;
+    let mut index_modes = BTreeMap::new();
+    for entry in index.entries() {
+        if entry.stage() != gix::index::entry::Stage::Unconflicted {
+            continue;
+        }
+        let rel = String::from_utf8_lossy(entry.path(&index)).into_owned();
+        index_modes.insert(rel, entry.mode);
+    }
+
     let mut changed = Vec::new();
     let mut kinds = BTreeMap::new();
     for candidate in candidates {
         let git_path = git_relative_path(workdir, cwd, &candidate.abs)?;
         match entries.get(&git_path) {
-            Some(oid) => {
+            Some((oid, mode)) => {
                 let base = repo
                     .find_object(*oid)
                     .with_context(|| format!("cannot read Git blob for `{}`", candidate.rel))?;
                 let working = std::fs::read(&candidate.abs)
                     .with_context(|| format!("cannot read `{}`", candidate.rel))?;
-                if working != base.data && normalize_crlf(&working) != normalize_crlf(&base.data) {
+                let content_changed =
+                    working != base.data && normalize_crlf(&working) != normalize_crlf(&base.data);
+                let mode_changed = head_modes
+                    .get(&git_path)
+                    .is_some_and(|head_mode| head_mode != mode)
+                    || index_modes
+                        .get(&git_path)
+                        .and_then(|index_mode| index_mode.to_tree_entry_mode())
+                        .is_some_and(|index_mode| index_mode != *mode);
+                if content_changed || mode_changed {
                     kinds.insert(candidate.rel.clone(), ChangeKind::Changed);
                     changed.push(candidate);
                 }
@@ -107,7 +140,7 @@ pub fn select(
         .map(|path| absolute_lexical(cwd, path))
         .collect();
     let mut deleted = Vec::new();
-    for (git_path, oid) in entries {
+    for (git_path, (oid, _mode)) in entries {
         let Some(abs) = repo.workdir_path(gix::bstr::BStr::new(git_path.as_bytes())) else {
             continue;
         };

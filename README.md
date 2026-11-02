@@ -195,11 +195,14 @@ fn main() {
 </context>
 ```
 
-Ordinary code is **not** XML-escaped — escaping `<`, `>` and `&` would both
-waste tokens and corrupt the code. Only the two sequences that could actually
-close a block, `</file>` and `</context>`, are escaped (to `&lt;/file>` and
-`&lt;/context>`), and only in that exact form. A file containing a literal
-`</file>` therefore cannot break the structure.
+Paths in the tree and `path` attributes escape XML-special characters, so an
+XML parser recovers the original path. Ordinary code is **not** fully
+XML-escaped — only the two sequences that could close a block, `</file>` and
+`</context>`, are escaped (to `&lt;/file>` and `&lt;/context>`), and only in
+that exact form. A file containing a literal `</file>` therefore cannot break
+the structure. This is a prompt format, not a guarantee of well-formed XML for
+arbitrary source text: for example, a raw `&` or `]]>` in a body can make the
+document unparsable.
 
 ### `md`
 

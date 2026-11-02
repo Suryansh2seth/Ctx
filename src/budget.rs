@@ -569,6 +569,135 @@ mod tests {
     }
 
     #[test]
+    fn planner_handles_exact_and_adjacent_budget_boundaries() {
+        let c = vec![Contribution {
+            rel: "only.txt".into(),
+            block_bytes: 100,
+            priority: 1,
+        }];
+        for (limit, expected_omit) in [(111, false), (110, false), (109, true)] {
+            let p = Planner {
+                contributions: &c,
+                fixed_bytes: 10,
+                annotation_bytes: 1,
+                ratio: 1.0,
+                limit,
+            };
+            let plan = p.plan();
+            assert!(plan.fits, "limit={limit}");
+            assert_eq!(plan.omit, vec![expected_omit], "limit={limit}");
+            assert!(plan.total_tokens <= limit, "limit={limit}: {plan:?}");
+        }
+    }
+
+    #[test]
+    fn planner_ties_are_deterministic_and_explicit_files_drop_last() {
+        let tied = vec![
+            Contribution {
+                rel: "b.txt".into(),
+                block_bytes: 50,
+                priority: 10,
+            },
+            Contribution {
+                rel: "a.txt".into(),
+                block_bytes: 50,
+                priority: 10,
+            },
+        ];
+        let tie_plan = Planner {
+            contributions: &tied,
+            fixed_bytes: 10,
+            annotation_bytes: 1,
+            ratio: 1.0,
+            limit: 61,
+        }
+        .plan();
+        assert_eq!(tie_plan.omit, vec![false, true]);
+        for _ in 0..20 {
+            assert_eq!(
+                Planner {
+                    contributions: &tied,
+                    fixed_bytes: 10,
+                    annotation_bytes: 1,
+                    ratio: 1.0,
+                    limit: 61,
+                }
+                .plan(),
+                tie_plan
+            );
+        }
+
+        let explicit = vec![
+            Contribution {
+                rel: "discovered.txt".into(),
+                block_bytes: 50,
+                priority: 10,
+            },
+            Contribution {
+                rel: "named.txt".into(),
+                block_bytes: 50,
+                priority: 20,
+            },
+        ];
+        let plan = Planner {
+            contributions: &explicit,
+            fixed_bytes: 10,
+            annotation_bytes: 1,
+            ratio: 1.0,
+            limit: 61,
+        }
+        .plan();
+        assert_eq!(plan.omit, vec![true, false]);
+        assert!(plan.total_tokens <= 61);
+    }
+
+    #[test]
+    fn randomized_plans_never_exceed_a_fitting_effective_limit() {
+        let mut state = 0x7d31_4a5bu64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            state
+        };
+        for case in 0..500 {
+            let count = (next() % 12 + 1) as usize;
+            let contributions: Vec<_> = (0..count)
+                .map(|index| Contribution {
+                    rel: format!("{case:03}/{index:02}.txt"),
+                    block_bytes: next() % 20_000,
+                    priority: (next() % 100_000) as i64,
+                })
+                .collect();
+            let fixed_bytes = next() % 2_000;
+            let annotation_bytes = next() % 24;
+            let ratio = [0.25, 1.0, 3.5, 17.0, 1024.0][(next() % 5) as usize];
+            let limit = next() % 20_000;
+            let p = Planner {
+                contributions: &contributions,
+                fixed_bytes,
+                annotation_bytes,
+                ratio,
+                limit,
+            };
+            let plan = p.plan();
+            assert_eq!(p.plan(), plan, "case={case} is not deterministic");
+            assert_eq!(p.total_bytes(&plan.omit), plan.total_bytes, "case={case}");
+            assert_eq!(
+                plan.total_tokens,
+                tokens::estimate_bytes(plan.total_bytes, ratio),
+                "case={case}"
+            );
+            if plan.fits {
+                assert!(plan.total_tokens <= limit, "case={case}: {plan:?}");
+            } else {
+                assert!(plan.omit.iter().all(|omitted| *omitted), "case={case}");
+                assert!(plan.total_tokens > limit, "case={case}: {plan:?}");
+            }
+        }
+    }
+
+    #[test]
     fn planner_without_a_tree_does_not_charge_for_annotations() {
         let c = contributions();
         let p = Planner {

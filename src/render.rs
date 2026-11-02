@@ -87,6 +87,20 @@ pub fn escape_xml_attr(s: &str) -> String {
     out
 }
 
+/// Escape a path for use as XML text inside the tree section.
+pub fn escape_xml_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// Escape only the sequences that could break the `<file>` structure.
 ///
 /// Ordinary code is left completely alone: escaping `<`, `>` or `&` would both
@@ -100,11 +114,24 @@ pub fn escape_xml_body(s: &str) -> String {
 }
 
 /// One tree line, optionally annotated as omitted.
-pub fn tree_line(rel: &str, omitted: bool) -> String {
+pub fn tree_line(format: Format, rel: &str, omitted: bool) -> String {
+    let rel = if format == Format::Xml {
+        escape_xml_text(rel)
+    } else {
+        rel.to_string()
+    };
     if omitted {
         format!("{rel}{}\n", crate::tokens::OMIT_ANNOTATION)
     } else {
         format!("{rel}\n")
+    }
+}
+
+pub fn deleted_tree_line(format: Format, rel: &str) -> String {
+    if format == Format::Xml {
+        format!("{}  [deleted]\n", escape_xml_text(rel))
+    } else {
+        format!("{rel}  [deleted]\n")
     }
 }
 
@@ -165,10 +192,10 @@ pub fn fixed_bytes_since(
 ) -> u64 {
     let mut lines = String::new();
     for file in files {
-        lines.push_str(&tree_line(&file.rel, false));
+        lines.push_str(&tree_line(format, &file.rel, false));
     }
     for path in deleted {
-        lines.push_str(&format!("{path}  [deleted]\n"));
+        lines.push_str(&deleted_tree_line(format, path));
     }
     (prefix_since(format, no_tree, since).len()
         + tree_section(format, no_tree, &lines).len()
@@ -267,10 +294,10 @@ pub fn render_payload_since(payload: &Payload, since: Option<&str>, deleted: &[S
     if !payload.no_tree {
         for (i, file) in payload.files.iter().enumerate() {
             let omitted = payload.omit.get(i).copied().unwrap_or(false);
-            lines.push_str(&tree_line(&file.rel, omitted));
+            lines.push_str(&tree_line(payload.format, &file.rel, omitted));
         }
         for path in deleted {
-            lines.push_str(&format!("{path}  [deleted]\n"));
+            lines.push_str(&deleted_tree_line(payload.format, path));
         }
     }
 
@@ -406,6 +433,27 @@ mod tests {
         assert_eq!(escape_xml_attr("a\"b"), "a&quot;b");
         assert_eq!(escape_xml_attr("a<b"), "a&lt;b");
         assert_eq!(escape_xml_attr("a&amp;b"), "a&amp;amp;b");
+    }
+
+    #[test]
+    fn xml_tree_paths_are_escaped_as_text() {
+        let files = vec![file("a&b < > \" ' d.txt", "content\n")];
+        let out = render_payload(&Payload {
+            format: Format::Xml,
+            no_tree: false,
+            tree_only: false,
+            files: &files,
+            omit: &[false],
+        });
+        assert!(out.contains("a&amp;b &lt; &gt; \" ' d.txt\n"), "{out}");
+        assert!(
+            out.contains("<file path=\"a&amp;b &lt; > &quot; ' d.txt\">"),
+            "{out}"
+        );
+        assert_eq!(
+            out.len() as u64,
+            fixed_bytes_since(Format::Xml, false, &files, None, &[]) + files[0].block_bytes
+        );
     }
 
     #[test]

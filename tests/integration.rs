@@ -135,6 +135,21 @@ fn git(root: &Path, args: &[&str]) {
     );
 }
 
+#[cfg(feature = "git")]
+fn git_stdout(root: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
 // ---------------------------------------------------------------------------
 // Traversal and ignore rules
 // ---------------------------------------------------------------------------
@@ -815,6 +830,37 @@ fn truncate_fits_within_budget_and_keeps_readme_and_manifests() {
 }
 
 #[test]
+fn truncate_keeps_an_explicit_file_after_discovered_files() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    write_file(root, "explicit.txt", "keep me\n");
+    write_file(root, "discovered.txt", &"drop me\n".repeat(80));
+
+    let output = ctx(root)
+        .arg(".")
+        .arg("explicit.txt")
+        .arg("--no-tree")
+        .arg("--ratio")
+        .arg("1")
+        .arg("--budget")
+        .arg("100")
+        .arg("--truncate")
+        .arg("--format")
+        .arg("plain")
+        .output()
+        .expect("run explicit-file truncation");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("===== explicit.txt ====="), "{stdout}");
+    assert!(!stdout.contains("===== discovered.txt ====="), "{stdout}");
+}
+
+#[test]
 fn truncate_reports_clearly_when_even_the_tree_is_too_big() {
     let dir = plain_fixture();
     let root = dir.path();
@@ -976,6 +1022,90 @@ fn output_file_is_not_included_in_its_own_payload() {
 }
 
 #[test]
+fn xml_escapes_legal_path_characters_in_tree_text_and_attributes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let name = "a&b ' c space.txt";
+    write_file(root, name, "content\n");
+
+    let output = ctx(root)
+        .arg("--quiet")
+        .output()
+        .expect("run XML path escaping check");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("a&amp;b ' c space.txt\n"), "{stdout}");
+    assert!(
+        stdout.contains("<file path=\"a&amp;b ' c space.txt\">"),
+        "{stdout}"
+    );
+}
+
+#[cfg(feature = "git")]
+#[test]
+fn since_includes_a_mode_only_change_from_an_older_revision() {
+    let Some(dir) = committed_git_fixture() else {
+        return;
+    };
+    let root = dir.path();
+    write_file(root, "mode-only.txt", "unchanged bytes\n");
+    git(root, &["add", "mode-only.txt"]);
+    git(root, &["commit", "-q", "-m", "add mode fixture"]);
+    git(root, &["update-index", "--chmod=+x", "mode-only.txt"]);
+    git(root, &["commit", "-q", "-m", "change mode only"]);
+
+    let output = ctx(root)
+        .arg("--since")
+        .arg("HEAD^")
+        .arg("--format")
+        .arg("plain")
+        .output()
+        .expect("run since after mode-only change");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("mode-only.txt"), "{stdout}");
+}
+
+#[cfg(feature = "git")]
+#[test]
+fn since_includes_a_staged_mode_only_change_from_head() {
+    let Some(dir) = committed_git_fixture() else {
+        return;
+    };
+    let root = dir.path();
+    write_file(root, "mode-only.txt", "unchanged bytes\n");
+    git(root, &["add", "mode-only.txt"]);
+    git(root, &["commit", "-q", "-m", "add mode fixture"]);
+    git(root, &["update-index", "--chmod=+x", "mode-only.txt"]);
+
+    let output = ctx(root)
+        .arg("--since")
+        .arg("HEAD")
+        .arg("--format")
+        .arg("plain")
+        .output()
+        .expect("run since after staged mode-only change");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("mode-only.txt"), "{stdout}");
+}
+
+#[test]
 fn follow_symlinks_does_not_hang_on_a_loop() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
@@ -1001,6 +1131,137 @@ fn follow_symlinks_does_not_hang_on_a_loop() {
     assert_eq!(output.status.code(), Some(0), "should terminate cleanly");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("a/file.rs"), "{stdout}");
+}
+
+#[test]
+fn symlink_file_directory_loop_and_broken_link_behavior() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    write_file(root, "target.txt", "target\n");
+    write_file(root, "folder/inside.txt", "inside\n");
+
+    #[cfg(unix)]
+    let links = (|| {
+        use std::os::unix::fs::symlink;
+        symlink(root.join("target.txt"), root.join("file-link.txt"))?;
+        symlink(root.join("folder"), root.join("dir-link"))?;
+        symlink(root.join("missing.txt"), root.join("broken-link.txt"))?;
+        symlink(root.join("folder"), root.join("folder/loop"))?;
+        Ok::<_, std::io::Error>(())
+    })();
+    #[cfg(windows)]
+    let links = (|| {
+        use std::os::windows::fs::{symlink_dir, symlink_file};
+        symlink_file(root.join("target.txt"), root.join("file-link.txt"))?;
+        symlink_dir(root.join("folder"), root.join("dir-link"))?;
+        symlink_file(root.join("missing.txt"), root.join("broken-link.txt"))?;
+        symlink_dir(root.join("folder"), root.join("folder/loop"))?;
+        Ok::<_, std::io::Error>(())
+    })();
+
+    if let Err(error) = links {
+        #[cfg(windows)]
+        {
+            println!(
+                "SKIPPED: Windows symlinks require Developer Mode or elevated privilege: {error}"
+            );
+            return;
+        }
+        #[cfg(not(windows))]
+        panic!("cannot create symlink fixtures: {error}");
+    }
+
+    let output = ctx(root)
+        .arg("--follow-symlinks")
+        .arg("--format")
+        .arg("plain")
+        .output()
+        .expect("run with symlinks");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("file-link.txt"), "{stdout}");
+    assert!(stdout.contains("dir-link/inside.txt"), "{stdout}");
+    assert!(stdout.contains("target.txt"), "{stdout}");
+    assert!(!stdout.contains("broken-link.txt"), "{stdout}");
+}
+
+#[test]
+fn crlf_payloads_and_secret_redaction_match_lf_in_all_formats() {
+    let crlf = tempfile::tempdir().expect("tempdir");
+    write_bytes(crlf.path(), "sample.txt", b"alpha\r\nbeta\r\n");
+    for format in ["xml", "md", "plain"] {
+        let output = ctx(crlf.path())
+            .arg("--quiet")
+            .arg("--format")
+            .arg(format)
+            .output()
+            .expect("run CRLF renderer");
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("alpha\nbeta\n"), "{format}: {stdout}");
+        assert!(!stdout.contains('\r'), "{format}: {stdout:?}");
+    }
+
+    let lf = tempfile::tempdir().expect("LF tempdir");
+    let crlf_secret = tempfile::tempdir().expect("CRLF tempdir");
+    let token = "ghp_aB3dE5fG7hJ9kL2mN4pQ6rS8tU0vW1xY";
+    write_file(lf.path(), "secret.txt", &format!("before {token} after\n"));
+    write_bytes(
+        crlf_secret.path(),
+        "secret.txt",
+        format!("before {token} after\r\n").as_bytes(),
+    );
+    let lf_out = ctx(lf.path()).output().expect("run LF redaction");
+    let crlf_out = ctx(crlf_secret.path())
+        .output()
+        .expect("run CRLF redaction");
+    assert_eq!(lf_out.status.code(), Some(0));
+    assert_eq!(crlf_out.status.code(), Some(0));
+    assert_eq!(lf_out.stdout, crlf_out.stdout);
+    assert!(String::from_utf8_lossy(&lf_out.stdout).contains("[REDACTED:github-token]"));
+    assert!(!String::from_utf8_lossy(&lf_out.stdout).contains(token));
+}
+
+#[cfg(feature = "git")]
+#[test]
+fn since_ignores_autocrlf_checkout_only_changes() {
+    let Some(dir) = committed_git_fixture() else {
+        return;
+    };
+    let root = dir.path();
+    git(root, &["config", "core.autocrlf", "true"]);
+    write_file(root, "autocrlf.txt", "one\ntwo\n");
+    git(root, &["add", "autocrlf.txt"]);
+    git(root, &["commit", "-q", "-m", "add autocrlf fixture"]);
+    fs::remove_file(root.join("autocrlf.txt")).expect("remove worktree file");
+    git(root, &["checkout", "--", "autocrlf.txt"]);
+
+    let checkout = fs::read(root.join("autocrlf.txt")).expect("read autocrlf checkout");
+    assert!(
+        checkout.windows(2).any(|pair| pair == b"\r\n"),
+        "Git did not produce a CRLF checkout"
+    );
+    let output = ctx(root)
+        .arg("--since")
+        .arg("HEAD")
+        .output()
+        .expect("run since with autocrlf");
+    assert_eq!(output.status.code(), Some(4));
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("autocrlf.txt"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 #[cfg(feature = "git")]
 #[test]
@@ -1296,4 +1557,237 @@ fn since_only_suggests_a_shallow_clone_when_the_repository_is_shallow() {
     assert_eq!(output.status.code(), Some(1), "{stderr}");
     assert!(output.stdout.is_empty());
     assert!(stderr.contains("shallow clone may not contain"), "{stderr}");
+}
+
+#[cfg(feature = "git")]
+#[test]
+fn since_handles_rename_revisions_and_detached_head() {
+    let Some(dir) = committed_git_fixture() else {
+        return;
+    };
+    let root = dir.path();
+    write_file(root, "rename-old.txt", "rename content\n");
+    git(root, &["add", "rename-old.txt"]);
+    git(root, &["commit", "-q", "-m", "add rename fixture"]);
+    git(root, &["mv", "rename-old.txt", "rename-new.txt"]);
+    git(root, &["commit", "-q", "-m", "rename fixture"]);
+    git(
+        root,
+        &["tag", "-a", "audit-tag", "-m", "annotated audit tag"],
+    );
+
+    let renamed = ctx(root)
+        .arg("--since")
+        .arg("HEAD^")
+        .arg("--format")
+        .arg("plain")
+        .output()
+        .expect("run since with rename");
+    assert_eq!(
+        renamed.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&renamed.stderr)
+    );
+    let renamed_stdout = String::from_utf8_lossy(&renamed.stdout);
+    assert!(
+        renamed_stdout.contains("rename-new.txt"),
+        "{renamed_stdout}"
+    );
+    assert!(
+        renamed_stdout.contains("rename-old.txt  [deleted]"),
+        "{renamed_stdout}"
+    );
+
+    let short = git_stdout(root, &["rev-parse", "--short", "HEAD"]);
+    let by_short = ctx(root)
+        .arg("--since")
+        .arg(short)
+        .output()
+        .expect("run since with short SHA");
+    assert_eq!(by_short.status.code(), Some(4));
+    let by_tag = ctx(root)
+        .arg("--since")
+        .arg("audit-tag")
+        .output()
+        .expect("run since with annotated tag");
+    assert_eq!(by_tag.status.code(), Some(4));
+
+    git(root, &["checkout", "--detach", "HEAD"]);
+    let detached = ctx(root)
+        .arg("--since")
+        .arg("HEAD^")
+        .arg("--format")
+        .arg("plain")
+        .output()
+        .expect("run since from detached HEAD");
+    assert_eq!(
+        detached.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&detached.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&detached.stdout).contains("rename-new.txt"),
+        "{}",
+        String::from_utf8_lossy(&detached.stdout)
+    );
+}
+
+#[cfg(feature = "git")]
+#[test]
+fn since_rejects_ranges_and_non_commit_objects_and_paths_outside_repo() {
+    let Some(dir) = committed_git_fixture() else {
+        return;
+    };
+    let root = dir.path();
+    write_file(root, "object.txt", "blob object\n");
+    let object_id = git_stdout(root, &["hash-object", "-w", "object.txt"]);
+
+    for revision in ["HEAD^..HEAD", object_id.as_str()] {
+        let output = ctx(root)
+            .arg("--since")
+            .arg(revision)
+            .output()
+            .expect("run since with invalid object expression");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{revision}: {stderr}");
+        assert!(
+            stderr.contains("cannot resolve revision"),
+            "{revision}: {stderr}"
+        );
+    }
+
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    write_file(outside.path(), "outside.txt", "outside\n");
+    let output = ctx(root)
+        .arg("--since")
+        .arg("HEAD")
+        .arg(outside.path().join("outside.txt"))
+        .output()
+        .expect("run since with outside path");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("outside the Git working tree"), "{stderr}");
+}
+
+#[cfg(feature = "git")]
+#[test]
+fn since_from_subdirectories_submodules_and_bare_repositories() {
+    let Some(dir) = committed_git_fixture() else {
+        return;
+    };
+    let root = dir.path();
+    write_file(root, "nested/subdir.txt", "base\n");
+    git(root, &["add", "nested/subdir.txt"]);
+    git(root, &["commit", "-q", "-m", "add nested fixture"]);
+    write_file(root, "nested/subdir.txt", "changed\n");
+
+    let nested = root.join("nested");
+    let mut nested_command = ctx_raw(&nested);
+    nested_command
+        .env_remove("GIT_CEILING_DIRECTORIES")
+        .arg("--since")
+        .arg("HEAD")
+        .arg("--format")
+        .arg("plain");
+    let nested_output = nested_command.output().expect("run from subdirectory");
+    assert_eq!(
+        nested_output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&nested_output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&nested_output.stdout).contains("subdir.txt"),
+        "{}",
+        String::from_utf8_lossy(&nested_output.stdout)
+    );
+
+    let sub_source = tempfile::tempdir().expect("submodule source");
+    git(sub_source.path(), &["init", "-q"]);
+    git(
+        sub_source.path(),
+        &["config", "user.email", "ctx-test@example.invalid"],
+    );
+    git(
+        sub_source.path(),
+        &["config", "user.name", "ctx integration test"],
+    );
+    write_file(sub_source.path(), "sub.txt", "base\n");
+    git(sub_source.path(), &["add", "sub.txt"]);
+    git(
+        sub_source.path(),
+        &["commit", "-q", "-m", "submodule baseline"],
+    );
+    let source_url = format!(
+        "file:///{}",
+        sub_source.path().to_string_lossy().replace('\\', "/")
+    );
+    let submodule_add = std::process::Command::new("git")
+        .args([
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            &source_url,
+            "submodule",
+        ])
+        .current_dir(root)
+        .output()
+        .expect("add local submodule");
+    assert!(
+        submodule_add.status.success(),
+        "git submodule add failed: {}",
+        String::from_utf8_lossy(&submodule_add.stderr)
+    );
+    git(root, &["add", ".gitmodules", "submodule"]);
+    git(root, &["commit", "-q", "-m", "add submodule"]);
+    write_file(root, "submodule/sub.txt", "changed\n");
+
+    let subdir = root.join("submodule");
+    let mut submodule_command = ctx_raw(&subdir);
+    submodule_command
+        .env_remove("GIT_CEILING_DIRECTORIES")
+        .arg("--since")
+        .arg("HEAD")
+        .arg("--format")
+        .arg("plain");
+    let submodule_output = submodule_command.output().expect("run inside submodule");
+    assert_eq!(
+        submodule_output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&submodule_output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&submodule_output.stdout).contains("sub.txt"),
+        "{}",
+        String::from_utf8_lossy(&submodule_output.stdout)
+    );
+
+    let bare = tempfile::tempdir().expect("bare repo directory");
+    let bare_result = std::process::Command::new("git")
+        .args(["clone", "--bare", "--quiet"])
+        .arg(root)
+        .arg(bare.path())
+        .output()
+        .expect("clone bare repository");
+    assert!(
+        bare_result.status.success(),
+        "git clone --bare failed: {}",
+        String::from_utf8_lossy(&bare_result.stderr)
+    );
+    let bare_output = ctx(bare.path())
+        .arg("--since")
+        .arg("HEAD")
+        .output()
+        .expect("run since in bare repository");
+    assert_eq!(bare_output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&bare_output.stderr).contains("requires a Git working tree"),
+        "{}",
+        String::from_utf8_lossy(&bare_output.stderr)
+    );
 }
